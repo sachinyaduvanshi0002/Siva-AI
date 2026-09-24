@@ -11,6 +11,7 @@ function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
 
   const textareaRef = useRef(null)
+  const abortControllerRef = useRef(null);
   const chatBoxRef = useRef(null)
   const intervalRef = useRef(null)
 
@@ -44,7 +45,7 @@ function App() {
     textareaRef.current?.focus()
   }
 
-  function sendMessage() {
+  async function sendMessage() {
     if (isTyping) {
       return
     }
@@ -53,67 +54,72 @@ function App() {
       return
     }
 
-    function getAIResponse(userMessage) {
-      const text = userMessage.toLowerCase()
-
-      if (text.includes('hello') || text.includes('hi')) {
-        return 'Hello! 👋 How can I help you?'
-      }
-
-      if (text.includes('how are you')) {
-        return "I'm just a bunch of code, but I'm functioning as expected! 🤖"
-      }
-
-      if (text.includes('ok')) {
-        return "okay!😎"
-      }
-
-      if (text.includes('python')) {
-        return 'Python is a popular programming language used for web development, AI, automation and more. 🐍'
-      }
-
-      if (text.includes('react')) {
-        return 'React is a JavaScript library used to build user interfaces. ⚛️'
-      }
-
-      return "I'm still learning Dost! 🤖 Try asking me about Python or React."
-    }
-
-    const userMessage = message
-
-    setMessages([
-      ...messages,
-      { text: userMessage, sender: 'user' }
-    ])
+    const userMessage = message.trim()
 
     setMessage('')
     setIsTyping(true)
+    setIsStreaming(true)
 
-    setTimeout(() => {
-      const aiResponse = getAIResponse(userMessage)
+    // User message + empty AI message
+    setMessages(prevMessages => [
+      ...prevMessages,
+      {
+        text: userMessage,
+        sender: 'user'
+      },
+      {
+        text: '',
+        sender: 'ai'
+      }
+    ])
 
+    // Request ko later stop karne ke liye
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
-      setMessages(prevMessages => [
-        ...prevMessages,
-        { text: '', sender: 'ai' }
-      ])
+    try {
+      const response = await fetch(
+        'http://127.0.0.1:8000/api/chat/stream',
+        {
+          method: 'POST',
 
-      setIsStreaming(true)
+          headers: {
+            'Content-Type': 'application/json'
+          },
+
+          body: JSON.stringify({
+            message: userMessage
+          }),
+
+          signal: controller.signal
+        }
+      )
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`)
+      }
+
+      if (!response.body) {
+        throw new Error('Streaming response not available')
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
 
       let currentText = ''
-      let index = 0
 
-      intervalRef.current = setInterval(() => {
+      while (true) {
+        const { value, done } = await reader.read()
 
-        if (index >= aiResponse.length) {
-          clearInterval(intervalRef.current)
-          intervalRef.current = null
-          setIsTyping(false)
-          setIsStreaming(false)
-          return
+        if (done) {
+          break
         }
 
-        currentText += aiResponse[index]
+        const chunk = decoder.decode(value, {
+          stream: true
+        })
+
+        currentText += chunk
 
         setMessages(prevMessages => {
           const updatedMessages = [...prevMessages]
@@ -125,25 +131,52 @@ function App() {
 
           return updatedMessages
         })
+      }
 
-        index++
+    } catch (error) {
 
-      }, 25)
-    }, 1000)
+      if (error.name === 'AbortError') {
+        console.log('Generation stopped')
+      } else {
+        console.error('Chat error:', error)
 
-    setMessage('')
+        setMessages(prevMessages => {
+          const updatedMessages = [...prevMessages]
 
+          updatedMessages[updatedMessages.length - 1] = {
+            text: 'Sorry, something went wrong.',
+            sender: 'ai'
+          }
+
+          return updatedMessages
+        })
+      }
+
+    } finally {
+
+      setIsTyping(false)
+      setIsStreaming(false)
+      abortControllerRef.current = null
+    }
+
+    // Textarea height reset
     if (textareaRef.current) {
       textareaRef.current.style.height = '55px'
     }
   }
+
+
 
   function stopGeneration() {
     clearInterval(intervalRef.current)
     intervalRef.current = null
     setIsTyping(false)
     setIsStreaming(false)
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
   }
+
 
   function handleChange(e) {
 
